@@ -1,0 +1,20 @@
+Pipeline:
+1. Extract video + audio
+2. stream live audio
+3. Send new driver video frame every x seconds
+	if distance from previous frame is not too high
+
+4. stitch audio onto driver frame at receiver
+
+
+Video stream:
+Sender:
+	- create driver video chunk
+
+given deviate function
+rules for driver video:
+	- minimum record duration T
+	- no frames deviate much from init frame
+	- final frame is unnoticeably close to init frame
+
+
