@@ -15,31 +15,45 @@
 #include <opencv2/highgui/highgui.hpp>
 
 #define CV_FPS 30 // replace for different systems
-#define MAX_SECONDS_PER_CHUNK 20
+#define MAX_SECONDS_PER_CHUNK 4
 #define PIXEL_SIZE 3
 
+typedef unsigned char byte;
+ 
 /*
  * Special type to handle a usable driver video.
  */
 struct chunk {
-	char* buffer;
-	signed int rows;
-	signed int cols;
+	unsigned char* buffer;
+	unsigned char* deltas;
+
+	int rows; // in pixels NOT channels
+	int cols; // in pixels NOT channels
+#define row_size cols
+#define col_size rows
 	size_t frame_size;
 	size_t capacity; // capacity in bytes
 	unsigned int num_frames;
 	float fps; // record rate
 	size_t wp; 	// write pointer
 	
-	int chunk_start;
-	int chunk_end;
-	
 	chunk(int rows, int cols);
 	~chunk();
 	void ingest_frame(cv::Mat& frame);
 	inline void* get_frame(unsigned int f) {
-		return (void*) ((char*) buffer + frame_size * f);
+		return (unsigned char*) buffer + frame_size * f;
 	}
+	inline unsigned char* get_delta_frame(unsigned int f) {
+		return (unsigned char*) deltas + frame_size * f;
+	}
+	int row_com(int row, byte* frame);
+
+	void convert_to_grey(unsigned char* buf);
+	void mark_spot(unsigned char* buf, int row, int col, byte r, byte g, byte b);
+	void draw_vertical_line(unsigned char* buf, int col, byte r, byte g, byte b);
+	void draw_horizontal_line(unsigned char* buf, int row, byte r, byte g, byte b);
+	void isolate_delta(byte* init, byte* cur, byte* res);
+
 };
 
 class chunk_reader {

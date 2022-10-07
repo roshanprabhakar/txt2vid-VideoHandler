@@ -2,6 +2,7 @@
 #include <math.h>
 
 #include <chrono>
+#include <opencv2/imgproc/imgproc.hpp>
 
 #include "chunk_reader.h"
 
@@ -36,31 +37,165 @@ double compare1(void* f1, void* f2, size_t frame_size) {
 
 ///////////// CHUNK /////////////
 
-chunk::chunk(int rows, int cols): wp(0), frame_size(rows * cols * PIXEL_SIZE),
-capacity(frame_size * MAX_SECONDS_PER_CHUNK * CV_FPS), num_frames(0) {
+chunk::chunk(int rows, int cols): 
+	wp(0), 
+	frame_size(rows * cols * PIXEL_SIZE), 
+	capacity(frame_size * MAX_SECONDS_PER_CHUNK * CV_FPS), num_frames(0), 
+	rows(rows), cols(cols) {
+
 	printf("chunk init: cap = %ld\n", capacity);
 	printf("expecting frame size: %ld\n", frame_size);
 
-	buffer = new char[capacity];
+	buffer = new unsigned char[capacity];
+	deltas = new unsigned char[capacity];
 }
 
 chunk::~chunk() {
 	delete [] buffer;
+	delete [] deltas;
+}
+
+// for some reason can't pass m by ref
+void chunk::mark_spot(
+		unsigned char* buf,
+		int row, int col,
+		byte r, byte g, byte b) {
+
+	for (int dr = -1; dr < 1; dr++) {
+		for (int dc = -1; dc < 1; dc++) {
+		
+			if (row + dr < 0 || row + dr >= rows ||
+					col + dc < 0 || col + dc >= cols) continue;
+
+			buf[(row + dr) * row_size * PIXEL_SIZE + (col + dc) * PIXEL_SIZE + 0] = b;
+			buf[(row + dr) * row_size * PIXEL_SIZE + (col + dc) * PIXEL_SIZE + 1] = g;
+			buf[(row + dr) * row_size * PIXEL_SIZE + (col + dc) * PIXEL_SIZE + 2] = r;
+		}
+	}
+}
+
+void chunk::draw_vertical_line(
+		unsigned char* buffer,
+		int col,
+		byte r, byte g, byte b
+		) {
+	
+	for (int row = 0; row < col_size; row++) {
+		buffer[row * row_size * PIXEL_SIZE + col * PIXEL_SIZE + 0] = b;
+		buffer[row * row_size * PIXEL_SIZE + col * PIXEL_SIZE + 1] = g;
+		buffer[row * row_size * PIXEL_SIZE + col * PIXEL_SIZE + 2] = r;
+	}
+}
+
+void chunk::draw_horizontal_line(
+		unsigned char* buffer,
+		int row,
+		byte r, byte g, byte b
+		) {
+
+	for (int col = 0; col < row_size; col++) {
+		buffer[row * row_size * PIXEL_SIZE + col * PIXEL_SIZE + 0] = b;
+		buffer[row * row_size * PIXEL_SIZE + col * PIXEL_SIZE + 1] = g;
+		buffer[row * row_size * PIXEL_SIZE + col * PIXEL_SIZE + 2] = r;
+	}
+}
+
+/*
+ * Custom routine, for some reason CV_COLORBGR2GREY
+ * 9-plexes the image.
+ */
+void chunk::convert_to_grey(unsigned char* buffer) {
+	register unsigned int c1, c2, c3, avg;
+	for (size_t i = 0; i < frame_size; i += 3) {
+
+		c1 = (unsigned int) *(buffer + i + 0);
+		c2 = (unsigned int) *(buffer + i + 1);
+		c3 = (unsigned int) *(buffer + i + 2);
+		avg = (c1 + c2 + c3) / 3;
+
+		buffer[i + 0] = avg;
+		buffer[i + 1] = avg;
+		buffer[i + 2] = avg;
+	}
+}
+
+inline char transform(int diff) {
+	return (char) (510 * (1.0 / (1.0 + exp(-0.3 * diff)) - 0.5));
+}
+
+void chunk::isolate_delta(byte* init, byte* cur, byte* res) {
+	for (size_t i = 0; i < frame_size; i += PIXEL_SIZE) {
+		int diff = *(cur + i) - *(init + i);
+		diff = (diff < 0) ? -1 * diff : diff;
+		char tdiff = transform(diff);
+		*(res + i + 0) = (byte) diff;
+		*(res + i + 1) = (byte) diff;
+		*(res + i + 2) = (byte) diff;
+	}
 }
 
 void chunk::ingest_frame(cv::Mat& m) {
 	if (wp == capacity) { fprintf(stderr, "chunk full\n"); return; }
 	if (!m.isContinuous()) { fprintf(stderr, "frame not continuous\n"); return; }
 
- 	// process frame
-	// printf("num pixels: %ld, pixel size: %ld;\t", m.total(), m.elemSize());
-	// printf("expecting num pixels: %ld\n", frame_size / PIXEL_SIZE);
 
-	size_t n = m.total() * m.elemSize();
-	memcpy((char*) buffer + wp, m.data, n);
-	wp += n;
+	// easier to analyze single channeled image
+	convert_to_grey(m.data);
 
+	// isolate frame deltas
+	if (wp != 0) {
+		isolate_delta(buffer + wp - frame_size, m.data, deltas + wp);
+	}
+
+	// draw row com for ever row in delta frame
+	int row_coms[rows];
+	for (int r = 0; r < rows; r++) {
+		
+		int row_mass = 0;
+		for (int c = 0; c < row_size; c++) {
+			row_mass += (deltas + wp)[r * row_size * PIXEL_SIZE + c * PIXEL_SIZE];
+		}
+
+		double row_com = 0;
+		for (int c = 0; c < row_size; c++) {
+			byte sig = (deltas + wp)[r * row_size * PIXEL_SIZE + c * PIXEL_SIZE];
+			row_com += (double) sig / row_mass * c;
+		}
+
+		row_coms[r] = (int) row_com;
+	}
+
+	// draw col com for every col in delta frame
+	int col_coms[cols];
+	for (int c = 0; c < cols; c++) {
+
+		int col_mass = 0;
+		for (int r = 0; r < col_size; r++) {
+			col_mass += (deltas + wp)[r * row_size * PIXEL_SIZE + c * PIXEL_SIZE];
+		}
+
+		double col_com = 0;
+		for (int r = 0; r < col_size; r++) {
+			byte sig = (deltas + wp)[r * row_size * PIXEL_SIZE + c * PIXEL_SIZE];
+			col_com += (double) sig / col_mass * r;
+		}
+
+		col_coms[c] = (int) col_com;
+	}
+
+	for (int r = 0; r < rows; r++) {
+		mark_spot(deltas + wp, r, row_coms[r], (byte) 255, 0, 0);
+	}
+	for (int c = 0; c < cols; c++) {
+		mark_spot(deltas + wp, col_coms[c], c, (byte) 255, 0, 0);
+	}
+
+
+	memcpy((char*) buffer + wp, m.data, frame_size);
+	wp += frame_size;
 	num_frames++; 
+
+	return;
 }
 
 ////////// CHUNK_READER //////////
@@ -105,54 +240,7 @@ chunk* chunk_reader::generate_chunk() {
 
 	TimeStamp fin = currentTime();
 	c->fps = (float) c->num_frames / getTimeDifference(fin, cur); 
-
-	printf("slicing...\n");
-
-	// slice loopable frames
-	int slice_start;
-	int slice_end = CV_FPS * MAX_SECONDS_PER_CHUNK - 1;
-	double slice_diff = DBL_MAX;
-	double diff;
-
-	/* compare every frame with every other frame 
-	 * too expensive */
-	/*
-	for (int start = 0; start < c->num_frames - 1; start++) {
-		printf("%f\n", (double) start / c->num_frames);
-		for (int end = start + 1; end < c->num_frames; end++) {
-			diff = compare1(
-					c->get_frame(start), 
-					c->get_frame(end), 
-					c->frame_size
-			);
-			if (diff < slice_diff) {
-				slice_diff = diff;
-				slice_start = start;
-				slice_end = end;
-			}
-		}
-	}
-	*/
-
-	// otherwise closest is simply second last frame
-	for (int f = slice_end; f >= 0; f--) {
-		diff = compare1(
-				c->get_frame(f),
-				c->get_frame(slice_end),
-				c->frame_size
-		);
-		if (diff < slice_diff && f < slice_end - CV_FPS * 4 /*sec*/) {
-			slice_diff = diff;
-			slice_start = f;
-		}
-	}
 	
-	printf("!!!!!!! start: %d, end: %d\n", slice_start, slice_end);
-	c->chunk_start = slice_start;
-	c->chunk_end = slice_end;
-
-	printf("!!! start: %d, end: %d\n", c->chunk_start, c->chunk_end);
-
 	return c;
 }
 

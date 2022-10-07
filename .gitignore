@@ -1,2 +1,3 @@
 video_driver/bin/
 *.swp
+video_driver/src/test.h
